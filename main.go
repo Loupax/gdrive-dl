@@ -9,7 +9,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"sync"
+	"syscall"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -124,25 +127,43 @@ func main() {
 		log.Fatalf("Unable to retrieve Drive client: %v", err)
 	}
 
+	sigChan := make(chan os.Signal, 1)
+
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		log.Print("The application doesn't terminate with Ctrl+C, use Ctrl+D instead")
+	}()
+
 	scanner := bufio.NewScanner(os.Stdin)
 	sem := semaphore.NewWeighted(int64(10))
+	var wg sync.WaitGroup
 	for scanner.Scan() {
-		go func() {
+		wg.Add(1)
+		fileID := scanner.Text()
+		go func(fileID string) {
+			defer wg.Done()
+			if fileID == "" {
+				return
+			}
+
 			sem.Acquire(ctx, 1)
 			defer sem.Release(1)
 
-			fileID := scanner.Text()
 			file, err := driveService.Files.Get(fileID).Fields("name,parents").Do()
 			if err != nil {
-				log.Fatalf("Unable to retrieve file: %v", err)
+				log.Printf("Unable to retrieve file: %v", err)
+				return
 			}
 			p, err := getFolderPath(driveService, file)
 			if err != nil {
-				log.Fatalf("Unable to retrieve folder path: %v", err)
+				log.Printf("Unable to retrieve folder path: %v", err)
+				return
 			}
 			resp, err := driveService.Files.Get(fileID).Download()
 			if err != nil {
-				log.Fatalf("Unable to download file: %v", err)
+				log.Printf("Unable to download file: %v", err)
+				return
 			}
 			defer resp.Body.Close()
 
@@ -150,17 +171,21 @@ func main() {
 				p = "./"
 			}
 			if err = os.MkdirAll(p, 0755); err != nil {
-				log.Fatalf("Unable to create destination folder: %s\n", p)
+				log.Printf("Unable to create destination folder: %s\n", p)
+				return
 			}
 			outFile, err := os.Create(fmt.Sprintf("%s%s", p, file.Name))
 			if err != nil {
-				log.Fatal("Unable to create download file")
+				log.Printf("Unable to create download file")
+				return
 			}
 			defer outFile.Close()
 			_, err = io.Copy(outFile, resp.Body)
 			if err != nil {
-				log.Fatalf("Unable to write file content: %v", err)
+				log.Printf("Unable to write file content: %v", err)
+				return
 			}
-		}()
+		}(fileID)
 	}
+	wg.Wait()
 }
