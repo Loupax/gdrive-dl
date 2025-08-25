@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
+	"golang.org/x/sync/semaphore"
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/option"
 )
@@ -100,9 +102,6 @@ func getFolderPath(srv *drive.Service, file *drive.File) (string, error) {
 }
 
 func main() {
-	// --- PASTE THE FILE ID YOU COPIED FROM THE URL HERE ---
-	fileID := os.Args[1]
-
 	ctx := context.Background()
 
 	home, err := os.UserHomeDir()
@@ -114,50 +113,54 @@ func main() {
 		log.Fatalf("Unable to read client secret file: %v", err)
 	}
 
-	// Create a configuration object from the JSON
 	config, err := google.ConfigFromJSON(b, driveMetadataScope)
 	if err != nil {
 		log.Fatalf("Unable to parse client secret file to config: %v", err)
 	}
 
-	// Get a client with the correct authentication token
 	client := getClient(config)
-
-	// Create a new Drive service using the authenticated client
 	driveService, err := drive.NewService(ctx, option.WithHTTPClient(client))
 	if err != nil {
 		log.Fatalf("Unable to retrieve Drive client: %v", err)
 	}
 
-	// Make the API call to get the file's metadata
-	// We use .Fields("name") to only request the name, which is more efficient
-	file, err := driveService.Files.Get(fileID).Fields("name,parents").Do()
-	if err != nil {
-		log.Fatalf("Unable to retrieve file: %v", err)
-	}
-	p, err := getFolderPath(driveService, file)
-	if err != nil {
-		log.Fatalf("Unable to retrieve folder path: %v", err)
-	}
-	resp, err := driveService.Files.Get(fileID).Download()
-	if err != nil {
-		log.Fatalf("Unable to download file: %v", err)
-	}
-	defer resp.Body.Close()
+	scanner := bufio.NewScanner(os.Stdin)
+	sem := semaphore.NewWeighted(int64(10))
+	for scanner.Scan() {
+		go func() {
+			sem.Acquire(ctx, 1)
+			defer sem.Release(1)
 
-	if p == ""{
-		p = "./"
-	}
-	if err := os.MkdirAll(p, 0755); err != nil {
-		log.Fatalf("Unable to create destination folder: %s\n", p)
-	}
-	outFile, err := os.Create(fmt.Sprintf("%s%s", p, file.Name))
-	if err != nil {
-		log.Fatal("Unable to create download file")
-	}
-	defer outFile.Close()
-	_, err = io.Copy(outFile, resp.Body)
-	if err != nil {
-		log.Fatalf("Unable to write file content: %v", err)
+			fileID := scanner.Text()
+			file, err := driveService.Files.Get(fileID).Fields("name,parents").Do()
+			if err != nil {
+				log.Fatalf("Unable to retrieve file: %v", err)
+			}
+			p, err := getFolderPath(driveService, file)
+			if err != nil {
+				log.Fatalf("Unable to retrieve folder path: %v", err)
+			}
+			resp, err := driveService.Files.Get(fileID).Download()
+			if err != nil {
+				log.Fatalf("Unable to download file: %v", err)
+			}
+			defer resp.Body.Close()
+
+			if p == "" {
+				p = "./"
+			}
+			if err = os.MkdirAll(p, 0755); err != nil {
+				log.Fatalf("Unable to create destination folder: %s\n", p)
+			}
+			outFile, err := os.Create(fmt.Sprintf("%s%s", p, file.Name))
+			if err != nil {
+				log.Fatal("Unable to create download file")
+			}
+			defer outFile.Close()
+			_, err = io.Copy(outFile, resp.Body)
+			if err != nil {
+				log.Fatalf("Unable to write file content: %v", err)
+			}
+		}()
 	}
 }
